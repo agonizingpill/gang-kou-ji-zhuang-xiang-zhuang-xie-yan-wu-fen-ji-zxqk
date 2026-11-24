@@ -1,0 +1,94 @@
+name: container-delay-triage
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-container-delay-triage}-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-port_ops}
+      POSTGRES_USER: ${POSTGRES_USER:-port_ops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-port_ops_local}
+    ports:
+      - "127.0.0.1:${DB_PORT:-17762}:5432"
+    volumes:
+      - container_delay_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  redis:
+    image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-container-delay-triage}-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - container_delay_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  backend:
+    build: ./backend
+    container_name: ${COMPOSE_PROJECT_NAME:-container-delay-triage}-backend
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://port_ops:port_ops_local@db:5432/port_ops}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:-container-delay-local-secret}
+      SEED_DEMO: ${SEED_DEMO:-true}
+      SHARED_DIR: /shared
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-19262}:8000"
+    volumes:
+      - container_delay_shared:/shared
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=2).read()"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  worker:
+    build: ./backend
+    container_name: ${COMPOSE_PROJECT_NAME:-container-delay-triage}-worker
+    command: ["python", "-m", "src.worker"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://port_ops:port_ops_local@db:5432/port_ops}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      SHARED_DIR: /shared
+    volumes:
+      - container_delay_shared:/shared
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import time; from pathlib import Path; p=Path('/shared/worker-heartbeat'); assert p.exists() and time.time()-p.stat().st_mtime < 15"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  frontend:
+    build: ./frontend
+    container_name: ${COMPOSE_PROJECT_NAME:-container-delay-triage}-frontend
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-18262}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+volumes:
+  container_delay_db:
+    name: container-delay-triage-db
+  container_delay_redis:
+    name: container-delay-triage-redis
+  container_delay_shared:
+    name: container-delay-triage-shared

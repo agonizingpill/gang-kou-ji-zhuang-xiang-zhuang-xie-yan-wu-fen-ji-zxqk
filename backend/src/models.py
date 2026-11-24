@@ -84,6 +84,9 @@ class DispatchAction(Base):
     status: Mapped[str] = mapped_column(String(20), default="queued")
     instruction: Mapped[str] = mapped_column(Text)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 派工当时采用的那次推理与等级快照，用于船方申诉时签发分级说明
+    analysis_job_id: Mapped[int | None] = mapped_column(ForeignKey("analysis_jobs.id"), nullable=True)
+    graded_level_snapshot: Mapped[str | None] = mapped_column(String(20), nullable=True)
     case: Mapped[DelayCase] = relationship(back_populates="actions")
 
 class AnalysisJob(Base):
@@ -107,4 +110,24 @@ class AuditLog(Base):
     entity: Mapped[str] = mapped_column(String(50))
     entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     detail: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class GradeExplanation(Base):
+    """船方申诉时主管签发的分级说明；一经签发即为冻结原件，重分级不影响已签说明。"""
+
+    __tablename__ = "grade_explanations"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_grade_explanation_idempotency"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("delay_cases.id"), index=True)
+    dispatch_action_id: Mapped[int | None] = mapped_column(ForeignKey("dispatch_actions.id"), nullable=True)
+    analysis_job_id: Mapped[int] = mapped_column(ForeignKey("analysis_jobs.id"))
+    # 派工（或案件）当时采用的等级，说明必须对得上该等级
+    explained_level: Mapped[str] = mapped_column(String(20))
+    runner_up_level: Mapped[str] = mapped_column(String(20))
+    document: Mapped[dict] = mapped_column(JSON)
+    idempotency_key: Mapped[str] = mapped_column(String(80), index=True)
+    issued_by: Mapped[str] = mapped_column(String(40))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)

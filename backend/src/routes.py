@@ -4,10 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from .database import redis_client
-from .models import AuditLog, AnalysisJob, ContainerCheck, DelayCase, DispatchAction, GateEvent, User, VesselCall
-from .schemas import ContainerIn, CustomsUpdate, DelayCaseIn, DispatchIn, GateIn, LoginIn, VesselIn
+from .models import AuditLog, AnalysisJob, ContainerCheck, DelayCase, DispatchAction, GateEvent, GradeExplanation, User, VesselCall
+from .schemas import ContainerIn, CustomsUpdate, DelayCaseIn, DispatchIn, GateIn, GradeExplanationIn, LoginIn, VesselIn
 from .security import current_user, get_db, hash_password, issue_token, require_roles
 from .services import build_features, domain_precheck
+from . import grade_explanation
 
 router = APIRouter(prefix="/api")
 
@@ -20,8 +21,9 @@ def vessel_dict(v: VesselCall, db):
 
 def case_dict(c: DelayCase, db):
     jobs = db.execute(select(AnalysisJob).where(AnalysisJob.case_id == c.id).order_by(AnalysisJob.id.desc())).scalars().all()
-    actions = [{"id": a.id, "action_type": a.action_type, "assignee": a.assignee, "due_at": a.due_at.isoformat(), "status": a.status, "instruction": a.instruction} for a in c.actions]
-    return {"id": c.id, "case_no": c.case_no, "vessel_id": c.vessel_id, "vessel": c.vessel.call_no if c.vessel else "", "vessel_name": c.vessel.vessel_name if c.vessel else "", "requested_level": c.requested_level, "final_level": c.final_level, "status": c.status, "reason": c.reason, "feature_snapshot": c.feature_snapshot, "model_output": c.model_output, "exception_reason": c.exception_reason, "jobs": [{"id": j.id, "status": j.status, "result": j.result, "error": j.error, "finished_at": j.finished_at.isoformat() if j.finished_at else None} for j in jobs], "actions": actions}
+    actions = [{"id": a.id, "action_type": a.action_type, "assignee": a.assignee, "due_at": a.due_at.isoformat(), "status": a.status, "instruction": a.instruction, "analysis_job_id": a.analysis_job_id, "graded_level_snapshot": a.graded_level_snapshot} for a in c.actions]
+    explanations = grade_explanation.list_for_case(db, c.id)
+    return {"id": c.id, "case_no": c.case_no, "vessel_id": c.vessel_id, "vessel": c.vessel.call_no if c.vessel else "", "vessel_name": c.vessel.vessel_name if c.vessel else "", "requested_level": c.requested_level, "final_level": c.final_level, "status": c.status, "reason": c.reason, "feature_snapshot": c.feature_snapshot, "model_output": c.model_output, "exception_reason": c.exception_reason, "jobs": [{"id": j.id, "status": j.status, "result": j.result, "error": j.error, "finished_at": j.finished_at.isoformat() if j.finished_at else None} for j in jobs], "actions": actions, "grade_explanations": explanations, "traceability": grade_explanation.traceability(db, c)}
 
 @router.post("/auth/login")
 def login(payload: LoginIn, db: Session = Depends(get_db)):
@@ -125,8 +127,35 @@ def create_action(case_id: int, payload: DispatchIn, db: Session = Depends(get_d
     case = db.get(DelayCase, case_id)
     if not case: raise HTTPException(404, "延误案件不存在")
     if case.status not in {"classified", "dispatched"} or not case.final_level: raise HTTPException(409, "案件尚未完成分级，不能生成调度动作")
-    a = DispatchAction(case_id=case.id, **payload.model_dump()); case.status = "dispatched"; db.add(a); db.flush(); log(db, user, "create_dispatch_action", "dispatch_action", a.id, payload.action_type); db.commit()
-    return {"id": a.id, "case_id": case.id, "status": a.status}
+    # 派工与分级结果同时落库：冻结派工当时采用的那次推理与等级
+    adopted_job = db.execute(select(AnalysisJob).where(AnalysisJob.case_id == case.id, AnalysisJob.status == "succeeded").order_by(AnalysisJob.id.desc())).scalars().first()
+    a = DispatchAction(case_id=case.id, **payload.model_dump(), analysis_job_id=adopted_job.id if adopted_job else None, graded_level_snapshot=case.final_level)
+    case.status = "dispatched"; db.add(a); db.flush(); log(db, user, "create_dispatch_action", "dispatch_action", a.id, f"{payload.action_type}｜采用推理 job={a.analysis_job_id} 等级={a.graded_level_snapshot}"); db.commit()
+    return {"id": a.id, "case_id": case.id, "status": a.status, "analysis_job_id": a.analysis_job_id, "graded_level_snapshot": a.graded_level_snapshot}
+
+@router.get("/cases/{case_id}/grade-explanations")
+def get_grade_explanations(case_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    case = db.get(DelayCase, case_id)
+    if not case: raise HTTPException(404, "延误案件不存在")
+    return {"traceability": grade_explanation.traceability(db, case), "explanations": grade_explanation.list_for_case(db, case.id)}
+
+@router.post("/cases/{case_id}/grade-explanations", status_code=201)
+def issue_grade_explanation(case_id: int, payload: GradeExplanationIn, db: Session = Depends(get_db), user: User = Depends(require_roles("supervisor"))):
+    case = db.get(DelayCase, case_id)
+    if not case: raise HTTPException(404, "延误案件不存在")
+    record, reused = grade_explanation.issue_for_case(db, case, user, payload.dispatch_action_id)
+    log(db, user, "issue_grade_explanation" if not reused else "reuse_grade_explanation", "grade_explanation", record.id, f"case={case.case_no} level={record.explained_level} job={record.analysis_job_id}")
+    db.commit()
+    return {"explanation": grade_explanation.serialize(record), "reused": reused, "message": "已存在签发原件，按原件返回" if reused else "分级说明已签发"}
+
+@router.get("/dispatch-actions/{action_id}/grade-explanation")
+def action_grade_explanation(action_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    action = db.get(DispatchAction, action_id)
+    if not action: raise HTTPException(404, "调度动作不存在")
+    record = db.execute(select(GradeExplanation).where(GradeExplanation.dispatch_action_id == action.id)).scalar_one_or_none()
+    if not record:
+        return {"explanation": None, "traceability": grade_explanation.traceability(db, action.case)}
+    return {"explanation": grade_explanation.serialize(record), "traceability": grade_explanation.traceability(db, action.case)}
 
 @router.post("/actions/{action_id}/complete")
 def complete_action(action_id: int, db: Session = Depends(get_db), user: User = Depends(require_roles("operator", "supervisor"))):

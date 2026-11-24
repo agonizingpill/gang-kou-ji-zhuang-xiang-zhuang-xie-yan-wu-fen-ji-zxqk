@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from redis import Redis
 
@@ -11,3 +11,20 @@ redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
 
 class Base(DeclarativeBase):
     pass
+
+
+def ensure_runtime_columns():
+    """对升级前已存在的库补齐新增列（CREATE TABLE 之外的轻量迁移）。"""
+    inspector = inspect(engine)
+    if "dispatch_actions" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("dispatch_actions")}
+    statements = []
+    if "analysis_job_id" not in existing:
+        statements.append("ALTER TABLE dispatch_actions ADD COLUMN analysis_job_id INTEGER REFERENCES analysis_jobs(id)")
+    if "graded_level_snapshot" not in existing:
+        statements.append("ALTER TABLE dispatch_actions ADD COLUMN graded_level_snapshot VARCHAR(20)")
+    if statements:
+        with engine.begin() as conn:
+            for statement in statements:
+                conn.execute(text(statement))

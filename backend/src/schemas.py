@@ -43,5 +43,8 @@ class DispatchIn(BaseModel):
     due_at: datetime
     instruction: str
 
+class GradeExplanationIn(BaseModel):
+    dispatch_action_id: int | None = None
+
 class CustomsUpdate(BaseModel):
     customs_status: str

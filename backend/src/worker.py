@@ -7,7 +7,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sqlalchemy import select
-from .database import Base, SessionLocal, engine
+from .database import Base, SessionLocal, engine, ensure_runtime_columns
 from .models import AnalysisJob, DelayCase
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -47,6 +47,19 @@ def train_model():
 
 MODEL = train_model()
 
+def model_evidence():
+    """冻结本次推理所用的 scaler 与 LR 参数，供分级说明脱离模型重训独立复核。"""
+    scaler = MODEL.named_steps["scale"]
+    lr = MODEL.named_steps["lr"]
+    return {
+        "classes": list(lr.classes_),
+        "feature_keys": list(FEATURE_KEYS),
+        "scaler_mean": [float(v) for v in scaler.mean_],
+        "scaler_scale": [float(v) for v in scaler.scale_],
+        "intercept": [float(v) for v in lr.intercept_],
+        "coef": [[float(v) for v in row] for row in lr.coef_],
+    }
+
 def run_job(job_id):
     db = SessionLocal()
     job = db.get(AnalysisJob, int(job_id))
@@ -63,7 +76,7 @@ def run_job(job_id):
         probs = MODEL.predict_proba(x)[0]
         classes = MODEL.named_steps["lr"].classes_
         confidence = float(max(probs))
-        result = {"label": label, "confidence": round(confidence, 4), "probabilities": {c: round(float(p), 4) for c, p in zip(classes, probs)}, "feature_keys": FEATURE_KEYS, "features": f, "formula": "手工交叉特征 = avg_gate_dwell_min×reefer_ratio, gate_event_count×container_count；StandardScaler + LogisticRegression(random_state=42)"}
+        result = {"label": label, "confidence": round(confidence, 4), "probabilities": {c: round(float(p), 4) for c, p in zip(classes, probs)}, "feature_keys": FEATURE_KEYS, "features": f, "model_evidence": model_evidence(), "formula": "手工交叉特征 = avg_gate_dwell_min×reefer_ratio, gate_event_count×container_count；StandardScaler + LogisticRegression(random_state=42)"}
         job.result = result; job.status = "succeeded"; job.finished_at = datetime.now(timezone.utc)
         case.model_output = result; case.final_level = label; case.status = "classified"; case.exception_reason = None
         db.commit()
@@ -74,6 +87,7 @@ def run_job(job_id):
 
 def main():
     Base.metadata.create_all(engine)
+    ensure_runtime_columns()
     SHARED_DIR.mkdir(parents=True, exist_ok=True)
     while True:
         Path(SHARED_DIR / "worker-heartbeat").touch()

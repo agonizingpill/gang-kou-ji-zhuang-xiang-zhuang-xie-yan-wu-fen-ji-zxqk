@@ -23,3 +23,11 @@
 #operational-cases th, #operational-cases td {padding:.4rem; text-align:left; border-bottom:1px solid #c2d7d3}
 #operational-cases details {margin:.6rem 0 1rem}
 #operational-cases summary {cursor:pointer; font-weight:600}
+#operational-cases .grade-panel {border-top:1px solid #c2d7d3; margin-top:1rem; padding-top:.8rem}
+#operational-cases .grade-ok {color:#1d6b4f}
+#operational-cases .grade-warn {color:#9a3b2e}
+#operational-cases .grade-doc {background:#eef5f2; border-left:.25rem solid #174b51; padding:.8rem; margin:.7rem 0}
+#operational-cases .grade-doc h4 {margin:.2rem 0 .4rem}
+#operational-cases .grade-math {font-weight:600; color:#163031; background:#dcebe6; padding:.5rem .6rem; border-radius:.4rem}
+#operational-cases .grade-doc pre {background:#163031; color:#d7ece8; padding:.7rem; border-radius:.5rem; overflow:auto; font-size:.8rem}
+#operational-cases .grade-doc table th, #operational-cases .grade-doc table td {font-size:.82rem; padding:.35rem .4rem}
